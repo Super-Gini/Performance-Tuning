@@ -1,0 +1,258 @@
+SQL Queries for SQL Profiles
+================================
+1. List all SQL Profiles
+SELECT
+    name,
+    category,
+    status,
+    type,
+    force_matching,
+    created,
+    last_modified,
+    description
+FROM dba_sql_profiles
+ORDER BY created DESC;
+
+2. Check a specific SQL Profile
+SELECT
+    name,
+    category,
+    status,
+    type,
+    force_matching,
+    created,
+    last_modified,
+    description
+FROM dba_sql_profiles
+WHERE name = UPPER('&profile_name');
+
+3. Find SQL Profiles currently being used
+SELECT
+    sql_id,
+    child_number,
+    plan_hash_value,
+    sql_profile,
+    parsing_schema_name,
+    executions,
+    ROUND(elapsed_time / 1000000, 2) AS elapsed_seconds,
+    ROUND(cpu_time / 1000000, 2) AS cpu_seconds,
+    buffer_gets,
+    disk_reads,
+    rows_processed,
+    last_active_time,
+    sql_text
+FROM v$sql
+WHERE sql_profile IS NOT NULL
+ORDER BY last_active_time DESC;
+
+For RAC:
+SELECT
+    inst_id,
+    sql_id,
+    child_number,
+    plan_hash_value,
+    sql_profile,
+    parsing_schema_name,
+    executions,
+    ROUND(elapsed_time / 1000000, 2) AS elapsed_seconds,
+    ROUND(cpu_time / 1000000, 2) AS cpu_seconds,
+    buffer_gets,
+    disk_reads,
+    rows_processed,
+    last_active_time,
+    sql_text
+FROM gv$sql
+WHERE sql_profile IS NOT NULL
+ORDER BY last_active_time DESC;
+
+4. Check whether a specific SQL ID uses a SQL Profile
+SELECT
+    sql_id,
+    child_number,
+    plan_hash_value,
+    sql_profile,
+    sql_plan_baseline,
+    executions,
+    ROUND(elapsed_time / 1000000, 2) AS elapsed_seconds,
+    ROUND(cpu_time / 1000000, 2) AS cpu_seconds,
+    buffer_gets,
+    disk_reads,
+    last_active_time,
+    sql_text
+FROM v$sql
+WHERE sql_id = '&sql_id'
+ORDER BY child_number;
+
+5. Display the execution plan and SQL Profile note
+SELECT *
+FROM TABLE(
+    DBMS_XPLAN.DISPLAY_CURSOR(
+        sql_id          => '&sql_id',
+        cursor_child_no => NULL,
+        format          => 'ALLSTATS LAST +OUTLINE +PEEKED_BINDS +NOTE'
+    )
+);
+
+Look for a note such as:
+SQL profile "<profile_name>" used for this statement
+
+6. Find profiles by name
+SELECT
+    name,
+    status,
+    category,
+    force_matching,
+    created,
+    last_modified,
+    description
+FROM dba_sql_profiles
+WHERE UPPER(name) LIKE UPPER('%&profile_pattern%')
+ORDER BY last_modified DESC;
+
+Example:
+SELECT
+    name,
+    status,
+    created,
+    last_modified
+FROM dba_sql_profiles
+WHERE UPPER(name) LIKE '%SLAM%'
+ORDER BY last_modified DESC;
+
+7. Find profiles by SQL text
+SELECT
+    name,
+    status,
+    force_matching,
+    created,
+    last_modified,
+    sql_text
+FROM dba_sql_profiles
+WHERE UPPER(sql_text) LIKE UPPER('%FND_CONCURRENT_REQUESTS%');
+
+8. Check SQL Profile signatures
+SELECT
+    name,
+    status,
+    force_matching,
+    signature,
+    sql_text
+FROM dba_sql_profiles
+WHERE name = UPPER('&profile_name');
+
+Compare the profile signature with SQL signatures in the cursor cache:
+SELECT
+    sql_id,
+    exact_matching_signature,
+    force_matching_signature,
+    sql_profile,
+    plan_hash_value,
+    executions,
+    sql_text
+FROM v$sql
+WHERE sql_id = '&sql_id';
+
+9. Display SQL Profile hints
+SET LONG 100000
+SET PAGESIZE 500
+SET LINESIZE 200
+SELECT DBMS_SQLTUNE.SELECT_SQL_PROFILE(
+           name   => '&profile_name',
+           format => 'ALL'
+       ) AS profile_details
+FROM dual;
+
+If this function is unavailable or restricted in your environment, use:
+SELECT
+    name,
+    status,
+    category,
+    force_matching,
+    signature,
+    description,
+    sql_text
+FROM dba_sql_profiles
+WHERE name = UPPER('&profile_name');
+
+10. Check SQL Tuning Advisor tasks that created profiles
+SELECT
+    task_name,
+    task_id,
+    advisor_name,
+    status,
+    created,
+    last_execution,
+    description
+FROM dba_advisor_tasks
+WHERE advisor_name = 'SQL Tuning Advisor'
+ORDER BY created DESC;
+
+Check recommendations:
+SELECT
+    task_name,
+    recommendation_id,
+    type,
+    benefit,
+    status
+FROM dba_advisor_recommendations
+WHERE task_name = '&task_name';
+
+11. Check SQL Profile usage for a concurrent program SQL
+If you know the SQL ID:
+SELECT
+    sql_id,
+    child_number,
+    sql_profile,
+    plan_hash_value,
+    executions,
+    ROUND(elapsed_time / 1000000, 2) AS elapsed_seconds,
+    ROUND(cpu_time / 1000000, 2) AS cpu_seconds,
+    buffer_gets,
+    disk_reads,
+    rows_processed,
+    last_active_time
+FROM v$sql
+WHERE sql_id = '&sql_id';
+
+If the SQL is not in V$SQL, check historical AWR data if licensed:
+SELECT
+    sql_id,
+    plan_hash_value,
+    executions_delta,
+    ROUND(elapsed_time_delta / 1000000, 2) AS elapsed_seconds,
+    ROUND(cpu_time_delta / 1000000, 2) AS cpu_seconds,
+    buffer_gets_delta,
+    disk_reads_delta,
+    snap_id
+FROM dba_hist_sqlstat
+WHERE sql_id = '&sql_id'
+ORDER BY snap_id DESC;
+
+12. Check SQL Profile status before changing it
+SELECT
+    name,
+    status,
+    category,
+    force_matching,
+    created,
+    last_modified
+FROM dba_sql_profiles
+WHERE name = UPPER('&profile_name');
+
+For a profile to be used, confirm:
+STATUS = ENABLED
+
+Then verify actual usage using:
+SELECT sql_profile
+FROM v$sql
+WHERE sql_id = '&sql_id';
+
+and:
+SELECT *
+FROM TABLE(
+    DBMS_XPLAN.DISPLAY_CURSOR(
+        '&sql_id',
+        NULL,
+        'ALLSTATS LAST +NOTE'
+    )
+);
