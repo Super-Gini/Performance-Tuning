@@ -256,3 +256,54 @@ FROM TABLE(
         'ALLSTATS LAST +NOTE'
     )
 );
+
+Disable the SQL Profile
+BEGIN
+    DBMS_SQLTUNE.ALTER_SQL_PROFILE(
+        name            => 'SYS_SQLPROF_12345678',
+        attribute_name  => 'STATUS',
+        value           => 'DISABLED'
+    );
+END;
+/
+**************************
+Enable the SQL Profile
+**************************
+BEGIN
+    DBMS_SQLTUNE.ALTER_SQL_PROFILE(
+        name            => 'SYS_SQLPROF_12345678',
+        attribute_name  => 'STATUS',
+        value           => 'ENABLED'
+    );
+END;
+/
+
+**************************
+Verify the Status
+**************************
+SELECT
+    name,
+    status,
+    category,
+    last_modified
+FROM dba_sql_profiles
+WHERE name = 'SYS_SQLPROF_12345678';
+
+Expected values:
+STATUS
+-------
+ENABLED
+
+or:
+DISABLED
+Confirm Whether the SQL Is Using the Profile
+SELECT
+    sql_id,
+    child_number,
+    plan_hash_value,
+    sql_profile,
+    executions,
+    last_active_time,
+    sql_text
+FROM v$sql
+WHERE sql_profile = 'SYS_SQLPROF_12345678';
