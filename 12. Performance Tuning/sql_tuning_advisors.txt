@@ -1,0 +1,284 @@
+SQL Tuning Advisor (STA) analyzes a SQL statement and provides recommendations to improve its execution performance.
+It is useful for SQL that has:
+High elapsed time
+High CPU usage
+High logical I/O (buffer_gets)
+High physical I/O (disk_reads)
+Poor execution plans
+Cardinality-estimation issues
+Regressed plans after statistics, patching, or data growth
+SQL Tuning Advisor is a separately licensed Oracle Database Enterprise Edition option: Oracle Tuning Pack. Confirm licensing before using it in production.
+What SQL Tuning Advisor Analyzes
+When you submit a SQL statement, SQL ID, AWR SQL ID, or SQL Tuning Set, Oracle evaluates:
+Execution plan
+Join order and join methods
+Index access versus full table scans
+Sorts, hash joins, nested loops
+Partition pruning
+Costly plan operations
+Optimizer statistics
+Missing, stale, or insufficient object statistics
+Missing histograms
+Incorrect cardinality estimates
+Alternative plans
+Better execution plans that Oracle can identify
+SQL Profiles
+A SQL Profile supplies additional optimizer information.
+It does not force an exact plan in the same way as a SQL Plan Baseline.
+It can improve cardinality estimates and plan selection.
+Missing indexes
+Oracle may recommend creating an index.
+Treat index recommendations carefully: validate DML overhead, storage, and impact on other SQL.
+SQL rewrites
+Oracle may propose a revised SQL statement.
+Review functional equivalence and test before implementation.
+Recommended Tuning Workflow
+Identify expensive SQL
+        ↓
+Confirm current plan, waits, and runtime
+        ↓
+Create and execute a tuning task
+        ↓
+Review findings and benefit estimate
+        ↓
+Test recommendation in lower environment
+        ↓
+Implement approved change
+        ↓
+Validate plan and performance
+        ↓
+Monitor and keep/revert as required
+1. Identify Expensive SQL
+Current SQL in Shared Pool
+SELECT
+    sql_id,
+    plan_hash_value,
+    executions,
+    ROUND(elapsed_time / 1000000, 2) AS elapsed_seconds,
+    ROUND(cpu_time / 1000000, 2)     AS cpu_seconds,
+    buffer_gets,
+    disk_reads,
+    rows_processed,
+    sql_profile,
+    sql_plan_baseline,
+    last_active_time,
+    SUBSTR(sql_text, 1, 1000) AS sql_text
+FROM v$sql
+WHERE executions > 0
+ORDER BY elapsed_time DESC
+FETCH FIRST 20 ROWS ONLY;
+
+For RAC, use GV$SQL and group or review by INST_ID.
+SQL Associated with a Concurrent Request
+First identify the request’s active database session:
+DEFINE request_id = 90002660;
+SELECT
+    r.request_id,
+    s.inst_id,
+    s.sid,
+    s.serial#,
+    s.sql_id,
+    s.sql_child_number,
+    s.sql_exec_start,
+    s.event,
+    s.wait_class,
+    s.seconds_in_wait
+FROM apps.fnd_concurrent_requests r
+JOIN gv$process p
+     ON p.spid = r.oracle_process_id
+JOIN gv$session s
+     ON s.paddr = p.addr
+    AND s.inst_id = p.inst_id
+WHERE r.request_id = &request_id;
+
+Capture the returned SQL_ID.
+2. Review the Current Plan Before Tuning
+SELECT *
+FROM TABLE(
+    DBMS_XPLAN.DISPLAY_CURSOR(
+        sql_id          => '&sql_id',
+        cursor_child_no => NULL,
+        format          => 'ALLSTATS LAST +PEEKED_BINDS +OUTLINE +NOTE'
+    )
+);
+
+Review:
+E-Rows versus A-Rows
+Buffers
+Reads
+Elapsed time per operation
+Join methods
+Full scans
+Plan notes
+SQL Profile / SQL Plan Baseline usage
+
+A large difference between estimated rows (E-Rows) and actual rows (A-Rows) is often a strong indication of missing or inaccurate optimizer statistics.
+3. Create a Tuning Task for a SQL ID in Memory
+SET SERVEROUTPUT ON;
+DECLARE
+    l_task_name VARCHAR2(100);
+BEGIN
+    l_task_name := DBMS_SQLTUNE.CREATE_TUNING_TASK(
+        sql_id      => '&sql_id',
+        scope       => DBMS_SQLTUNE.SCOPE_COMPREHENSIVE,
+        time_limit  => 300,
+        task_name   => 'TUNE_SQL_&sql_id',
+        description => 'Performance analysis for SQL ID &sql_id'
+    );
+    DBMS_OUTPUT.PUT_LINE('Created task: ' || l_task_name);
+END;
+/
+
+Execute the task:
+EXEC DBMS_SQLTUNE.EXECUTE_TUNING_TASK(
+    task_name => 'TUNE_SQL_&sql_id'
+);
+
+Check task status:
+SELECT
+    task_name,
+    status,
+    created,
+    last_execution,
+    execution_end
+FROM dba_advisor_tasks
+WHERE task_name = 'TUNE_SQL_&sql_id';
+4. Display the Advisor Report
+SET LONG 1000000
+SET LONGCHUNKSIZE 1000000
+SET PAGESIZE 0
+SET LINESIZE 200
+SELECT DBMS_SQLTUNE.REPORT_TUNING_TASK(
+           task_name => 'TUNE_SQL_&sql_id',
+           type      => 'TEXT',
+           level     => 'TYPICAL',
+           section   => 'ALL'
+       ) AS tuning_report
+FROM dual;
+
+For HTML output:
+SPOOL tuning_report_&sql_id..html
+SELECT DBMS_SQLTUNE.REPORT_TUNING_TASK(
+           task_name => 'TUNE_SQL_&sql_id',
+           type      => 'HTML',
+           level     => 'TYPICAL',
+           section   => 'ALL'
+       )
+FROM dual;
+SPOOL OFF;
+
+Review the Findings, Rationale, Estimated Benefit, and Recommendations sections.
+5. Common Recommendations and Actions
+Recommendation	Meaning	Recommended action
+Gather optimizer statistics	Statistics are stale/missing	Validate statistics scope and gather in lower environment first
+Accept SQL Profile	Optimizer needs better cardinality information	Test profile in lower environment, then implement through change control
+Create index	Access path may improve	Analyze DML, storage, and other workload impact before creating
+Restructure SQL	SQL can be rewritten for better performance	Validate with functional owner and regression test
+No recommendation	Current plan may already be reasonable	Check waits, database load, locks, I/O, and application behavior
+6. Accept a Recommended SQL Profile
+Only accept after reviewing the report and testing.
+DECLARE
+    l_profile_name VARCHAR2(100);
+BEGIN
+    l_profile_name := DBMS_SQLTUNE.ACCEPT_SQL_PROFILE(
+        task_name   => 'TUNE_SQL_&sql_id',
+        name        => 'SQLPROF_&sql_id',
+        force_match => FALSE,
+        replace     => FALSE
+    );
+    DBMS_OUTPUT.PUT_LINE('Created SQL Profile: ' || l_profile_name);
+END;
+/
+
+For SQL statements that differ only by literal values, use force_match => TRUE only after careful validation:
+DECLARE
+    l_profile_name VARCHAR2(100);
+BEGIN
+    l_profile_name := DBMS_SQLTUNE.ACCEPT_SQL_PROFILE(
+        task_name   => 'TUNE_SQL_&sql_id',
+        name        => 'SQLPROF_&sql_id',
+        force_match => TRUE,
+        replace     => FALSE
+    );
+END;
+/
+Verify the Profile
+SELECT
+    name,
+    status,
+    category,
+    force_matching,
+    created,
+    last_modified
+FROM dba_sql_profiles
+WHERE name = 'SQLPROF_&sql_id';
+
+Confirm actual use:
+SELECT
+    sql_id,
+    child_number,
+    plan_hash_value,
+    sql_profile,
+    sql_plan_baseline,
+    executions,
+    last_active_time
+FROM v$sql
+WHERE sql_id = '&sql_id';
+
+Also check the plan note:
+SELECT *
+FROM TABLE(
+    DBMS_XPLAN.DISPLAY_CURSOR(
+        sql_id          => '&sql_id',
+        cursor_child_no => NULL,
+        format          => 'ALLSTATS LAST +NOTE'
+    )
+);
+
+Expected note:
+SQL profile "SQLPROF_<sql_id>" used for this statement
+7. Use AWR SQL When the SQL Is No Longer in Memory
+If the SQL is no longer present in V$SQL, create the task from AWR:
+DECLARE
+    l_task_name VARCHAR2(100);
+BEGIN
+    l_task_name := DBMS_SQLTUNE.CREATE_TUNING_TASK(
+        begin_snap => &begin_snap_id,
+        end_snap   => &end_snap_id,
+        sql_id     => '&sql_id',
+        scope      => DBMS_SQLTUNE.SCOPE_COMPREHENSIVE,
+        time_limit => 300,
+        task_name  => 'TUNE_AWR_&sql_id',
+        description => 'AWR-based SQL tuning task'
+    );
+    DBMS_OUTPUT.PUT_LINE('Created task: ' || l_task_name);
+END;
+/
+
+Then execute and report on the task using the same commands above.
+AWR and historical SQL analysis require the appropriate Diagnostics Pack licensing in addition to any required Tuning Pack licensing.
+8. Clean Up the Tuning Task
+After the analysis is complete:
+EXEC DBMS_SQLTUNE.DROP_TUNING_TASK(
+    task_name => 'TUNE_SQL_&sql_id'
+);
+
+This removes only the tuning task and report metadata. It does not remove an already accepted SQL Profile.
+Practical Production Guidance
+Do not accept recommendations automatically in production.
+Capture baseline runtime, execution plan, logical reads, physical reads, and rows processed.
+Test the SQL Profile, index, statistics change, or SQL rewrite in a lower environment.
+Validate with representative bind values and data volume.
+Use a named SQL Profile such as:
+SQLPROF_SLAM_<sql_id>
+Confirm actual usage from V$SQL and DBMS_XPLAN.
+Monitor the production statement after implementation.
+Keep a rollback method ready:
+BEGIN
+    DBMS_SQLTUNE.ALTER_SQL_PROFILE(
+        name           => 'SQLPROF_SLAM_<sql_id>',
+        attribute_name => 'STATUS',
+        value          => 'DISABLED'
+    );
+END;
+/
